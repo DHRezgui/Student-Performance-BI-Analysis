@@ -1,0 +1,256 @@
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import *
+from pyspark.sql.types import *
+
+spark = SparkSession.builder.getOrCreate()
+
+# Charger les données depuis les tables permanentes
+student_info_df = spark.read.table("bi_project.temp.student_info_df")
+student_registration_df = spark.read.table("bi_project.temp.student_registration_df")
+
+# Recréer les vues temporaires depuis bi_project.dwh
+print(" Chargement des tables depuis bi_project.dwh...")
+
+dim_student = spark.read.table("bi_project.dwh.dim_student")
+dim_module = spark.read.table("bi_project.dwh.dim_module")
+dim_presentation = spark.read.table("bi_project.dwh.dim_presentation")
+dim_assessment = spark.read.table("bi_project.dwh.dim_assessment")
+dim_vle_activity = spark.read.table("bi_project.dwh.dim_vle_activity")
+fact_performance = spark.read.table("bi_project.dwh.fact_performance")
+fact_engagement = spark.read.table("bi_project.dwh.fact_engagement")
+fact_skills = spark.read.table("bi_project.dwh.fact_skills")
+
+# Créer les vues temporaires pour SQL
+dim_student.createOrReplaceTempView("dim_student")
+dim_module.createOrReplaceTempView("dim_module")
+dim_presentation.createOrReplaceTempView("dim_presentation")
+dim_assessment.createOrReplaceTempView("dim_assessment")
+dim_vle_activity.createOrReplaceTempView("dim_vle_activity")
+fact_performance.createOrReplaceTempView("fact_performance")
+fact_engagement.createOrReplaceTempView("fact_engagement")
+fact_skills.createOrReplaceTempView("fact_skills")
+
+print("✅ Vues temporaires recréées\n")
+
+
+
+print("KPI 1 : PERFORMANCE ACADÉMIQUE")
+print("=" * 50)
+
+kpi1_avg_score = spark.sql("""
+    SELECT 
+        code_module,
+        ROUND(AVG(score), 2) as avg_score,
+        COUNT(*) as total_evaluations,
+        SUM(CASE WHEN score >= 40 THEN 1 ELSE 0 END) as passed,
+        SUM(CASE WHEN score < 40 THEN 1 ELSE 0 END) as failed,
+        ROUND(SUM(CASE WHEN score >= 40 THEN 1 ELSE 0 END) * 100.0 / COUNT(*), 2) as pass_rate
+    FROM fact_performance
+    GROUP BY code_module
+    ORDER BY avg_score DESC
+""")
+
+kpi1_avg_score.show()
+
+
+print("\n KPI 2 : ENGAGEMENT VLE")
+print("=" * 50)
+
+kpi2_engagement = spark.sql("""
+    SELECT 
+        code_module,
+        code_presentation,
+        COUNT(DISTINCT id_student) as active_students,
+        SUM(sum_click) as total_clicks,
+        ROUND(AVG(sum_click), 2) as avg_clicks_per_interaction,
+        COUNT(DISTINCT interaction_date) as active_days
+    FROM fact_engagement
+    GROUP BY code_module, code_presentation
+    ORDER BY total_clicks DESC
+""")
+
+kpi2_engagement.show()
+
+
+print("\n KPI 3 : TAUX D'ABANDON")
+print("=" * 50)
+
+# Utiliser les données originales
+kpi3_dropout = student_info_df.join(
+    student_registration_df,
+    on=["id_student", "code_module", "code_presentation"],
+    how="inner"
+).groupBy("code_module", "code_presentation").agg(
+    count("*").alias("total_enrolled"),
+    sum(when(col("final_result") == "Withdrawn", 1).otherwise(0)).alias("withdrawn"),
+    round((sum(when(col("final_result") == "Withdrawn", 1).otherwise(0)) / count("*") * 100), 2).alias("dropout_rate")
+).orderBy(desc("dropout_rate"))
+
+kpi3_dropout.show()
+
+
+print("\n KPI 4 : IMPACT DÉMOGRAPHIQUE")
+print("=" * 50)
+
+kpi4_gender = spark.sql("""
+    SELECT 
+        s.gender,
+        COUNT(DISTINCT p.id_student) as total_students,
+        ROUND(AVG(p.score), 2) as avg_score,
+        ROUND(SUM(CASE WHEN p.score >= 40 THEN 1 ELSE 0 END) * 100.0 / COUNT(*), 2) as pass_rate
+    FROM fact_performance p
+    JOIN dim_student s ON p.id_student = s.id_student
+    GROUP BY s.gender
+""")
+
+print("Performance par genre:")
+kpi4_gender.show()
+
+kpi4_education = spark.sql("""
+    SELECT 
+        s.highest_education,
+        COUNT(DISTINCT p.id_student) as total_students,
+        ROUND(AVG(p.score), 2) as avg_score,
+        ROUND(SUM(CASE WHEN p.score >= 40 THEN 1 ELSE 0 END) * 100.0 / COUNT(*), 2) as pass_rate
+    FROM fact_performance p
+    JOIN dim_student s ON p.id_student = s.id_student
+    GROUP BY s.highest_education
+    ORDER BY avg_score DESC
+""")
+
+print("\nPerformance par niveau d'éducation:")
+kpi4_education.show()
+
+
+print("\n KPI 5 : ENGAGEMENT PAR TYPE D'ACTIVITÉ")
+print("=" * 50)
+
+kpi5_activity = spark.sql("""
+    SELECT 
+        v.activity_type,
+        COUNT(DISTINCT e.id_student) as unique_students,
+        SUM(e.sum_click) as total_clicks,
+        ROUND(AVG(e.sum_click), 2) as avg_clicks
+    FROM fact_engagement e
+    JOIN dim_vle_activity v ON e.id_site = v.id_site
+    GROUP BY v.activity_type
+    ORDER BY total_clicks DESC
+""")
+
+kpi5_activity.show()
+
+print("\n✅ TOUS LES KPI CALCULÉS!")
+
+
+
+# Vérifier TOUS les KPI (ajoutez ça pour confirmer)
+print("Lignes dans KPI 1 :", kpi1_avg_score.count())
+kpi1_avg_score.show(5)  # 5 lignes pour brevité
+
+print("Lignes dans KPI 2 :", kpi2_engagement.count())
+kpi2_engagement.show(5)
+
+print("Lignes dans KPI 3 :", kpi3_dropout.count())
+kpi3_dropout.show(5)
+
+print("Lignes dans KPI 4 Genre :", kpi4_gender.count())
+kpi4_gender.show(5)
+
+print("Lignes dans KPI 4 Éducation :", kpi4_education.count())
+kpi4_education.show(5)
+
+print("Lignes dans KPI 5 :", kpi5_activity.count())
+kpi5_activity.show(5)
+
+# Tables complètes
+print("Lignes dans fact_performance :", fact_performance.count())
+print("Lignes dans fact_engagement :", fact_engagement.count())
+print("Lignes dans dim_student :", dim_student.count())
+
+
+
+
+
+
+# EXPORT DES KPI POUR POWER BI
+
+print("\n📦 EXPORT DES DONNÉES POUR POWER BI (Hybride : Pandas pour petits KPI, Spark pour gros tables)")
+print("=" * 60)
+
+# Créer le répertoire d'export dans DBFS
+dbutils.fs.mkdirs('/FileStore/export')
+
+# Fonction helper pour petits DF (Pandas, avec overwrite)
+def export_small_csv(df, filename, max_rows=10000):
+    if df.count() > 0 and df.count() <= max_rows:
+        # Supprimer le fichier s'il existe déjà (pour éviter FileAlreadyExistsException)
+        dbutils.fs.rm(f"/FileStore/export/{filename}.csv", recurse=False)
+        pandas_df = df.toPandas()
+        csv_content = pandas_df.to_csv(index=False)
+        dbutils.fs.put(f"/FileStore/export/{filename}.csv", csv_content)
+        print(f"  ✅ {filename}.csv créé (Pandas, {len(pandas_df)} lignes)")
+    else:
+        print(f"  ⚠️ {filename} trop grand ({df.count()} lignes) – utilise Spark")
+
+# Fonction helper pour gros DF (Spark write, avec overwrite)
+def export_large_csv(df, filename):
+    if df.count() > 0:
+        # Supprimer le dossier s'il existe (pour clean overwrite)
+        dbutils.fs.rm(f"/FileStore/export/{filename}", recurse=True)
+        df.coalesce(1).write.mode("overwrite").option("header", "true").csv(f"/FileStore/export/{filename}")
+        print(f"  ✅ {filename}/ créé (Spark, {df.count()} lignes) – téléchargez part-00000-*.csv")
+    else:
+        print(f"  ⚠️ {filename} vide – pas d'export")
+
+# Exports KPI (petits, Pandas)
+print("📤 Exports KPI (petits)...")
+export_small_csv(kpi1_avg_score, "kpi1_performance")
+export_small_csv(kpi2_engagement, "kpi2_engagement")
+export_small_csv(kpi3_dropout, "kpi3_dropout")
+export_small_csv(kpi4_gender, "kpi4_gender")
+export_small_csv(kpi4_education, "kpi4_education")
+export_small_csv(kpi5_activity, "kpi5_activity")
+
+# Exports tables complètes (gros, Spark)
+print("\n📤 Export des tables complètes (gros)...")
+export_large_csv(fact_performance, "fact_performance")
+export_large_csv(fact_engagement, "fact_engagement")
+export_large_csv(dim_student, "dim_student")
+
+print("\n" + "=" * 60)
+print("✅ TOUS LES FICHIERS EXPORTÉS !")
+print("📍 Localisation : /FileStore/export/")
+print("\n📥 Pour télécharger :")
+print("   1. Databricks UI → Data → DBFS → FileStore → export")
+print("   2. Petits KPI : https://adb-4089688797934708.8.azuredatabricks.net/files/export/kpi1_performance.csv?o=4089688797934708")
+print("   3. Gros tables : Naviguez dans dossier ex. /fact_performance/ → Download part-00000-*.csv")
+print("      URL ex. : https://adb-4089688797934708.8.azuredatabricks.net/files/export/fact_performance/part-00000-tid-4089688797934708-*.csv?o=4089688797934708 (remplacez * par hash)")
+print("=" * 60)
+
+---
+
+# Lister le contenu de /FileStore/export/
+files_list = dbutils.fs.ls("/FileStore/export/")
+display(files_list)  # Affiche un tableau avec noms, tailles, dates
+
+---
+
+# Lister le contenu du dossier KPI 1 (exemple)
+files_inside = dbutils.fs.ls("/FileStore/export/kpi1_performance/")
+display(files_inside)  # Copiez le "name" du part-*.csv (ex. : part-00000-tid-4089688797934708-abc123.csv)
+
+---
+
+# Lister TOUS les exports et leur contenu (root + intérieur de chaque dossier)
+root_files = dbutils.fs.ls("/FileStore/export/")
+display(root_files)  # Tableau des dossiers : kpi1_performance, kpi2_engagement, etc.
+
+# Loop pour lister le contenu de CHAQUE dossier (copiez les "name" des part-*.csv)
+dossiers = ['kpi1_performance', 'kpi2_engagement', 'kpi3_dropout', 'kpi4_gender', 'kpi4_education', 'kpi5_activity', 'fact_performance', 'fact_engagement', 'dim_student']
+for dossier in dossiers:
+    try:
+        files_inside = dbutils.fs.ls(f"/FileStore/export/{dossier}/")
+        print(f"\nContenu de {dossier}/ :")
+        display(files_inside)  # Affiche le tableau avec le part-*.csv (copiez le "name")
+    except Exception as e:
+        print(f"Erreur pour {dossier} : {e} (dossier vide ou inexistant)")

@@ -1,0 +1,319 @@
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import *
+from pyspark.sql.types import *
+
+spark = SparkSession.builder.getOrCreate()
+
+# Lecture des tables temporaires
+courses_df = spark.read.table("bi_project.temp.courses_df")
+assessments_df = spark.read.table("bi_project.temp.assessments_df")
+vle_df = spark.read.table("bi_project.temp.vle_df")
+student_info_df = spark.read.table("bi_project.temp.student_info_df")
+student_registration_df = spark.read.table("bi_project.temp.student_registration_df")
+student_assessment_df = spark.read.table("bi_project.temp.student_assessment_df")
+online_classroom_data_df = spark.read.table("bi_project.temp.online_classroom_data_df")
+student_vle_df = spark.read.table("bi_project.temp.student_vle_df")
+
+print("Correction de online_classroom_data...")
+
+# Vérifier le nom de la première colonne
+first_col = online_classroom_data_df.columns[0]
+print(f"Première colonne détectée : '{first_col}'")
+
+# Si la première colonne n'a pas de nom ou s'appelle _c0
+if first_col.startswith("_c") or first_col == "" or first_col not in ["id_student"]:
+    online_classroom_data_df = online_classroom_data_df.withColumnRenamed(first_col, "id_student")
+    print(f"✅ Colonne '{first_col}' renommée en 'id_student'")
+
+# Vérifier la structure corrigée
+print("\nStructure corrigée :")
+online_classroom_data_df.printSchema()
+online_classroom_data_df.show(5)
+
+print("Création de Dim_Student...")
+
+dim_student = student_info_df.select(
+    col("id_student"),
+    col("gender"),
+    col("region"),
+    col("highest_education"),
+    col("imd_band"),
+    col("age_band"),
+    col("disability"),
+    col("num_of_prev_attempts"),
+    col("studied_credits")
+).distinct()
+
+# Nettoyer les valeurs manquantes
+dim_student = dim_student.na.fill({
+    "gender": "Unknown",
+    "region": "Unknown",
+    "disability": "N"
+})
+
+print(f"✅ Dim_Student créée : {dim_student.count()} étudiants")
+dim_student.show(5)
+
+
+print("Création de Dim_Module...")
+
+dim_module = courses_df.select(
+    col("code_module")
+).distinct()
+
+print(f"✅ Dim_Module créée : {dim_module.count()} modules")
+dim_module.show()
+
+
+print("Création de Dim_Presentation...")
+
+dim_presentation = courses_df.select(
+    col("code_presentation"),
+    col("module_presentation_length"),
+    substring(col("code_presentation"), 1, 4).alias("year"),
+    substring(col("code_presentation"), 5, 1).alias("semester")
+).distinct()
+
+print(f"✅ Dim_Presentation créée : {dim_presentation.count()} présentations")
+dim_presentation.show()
+
+
+print("Création de Dim_Assessment...")
+
+dim_assessment = assessments_df.select(
+    col("id_assessment"),
+    col("code_module"),
+    col("code_presentation"),
+    col("assessment_type"),
+    col("date").alias("assessment_date"),
+    col("weight")
+).distinct()
+
+# Ajouter une catégorie
+dim_assessment = dim_assessment.withColumn(
+    "is_final_exam",
+    when(col("assessment_type") == "Exam", True).otherwise(False)
+)
+
+print(f"✅ Dim_Assessment créée : {dim_assessment.count()} évaluations")
+dim_assessment.show(5)
+
+
+print("Création de Dim_VLE_Activity...")
+
+dim_vle_activity = vle_df.select(
+    col("id_site"),
+    col("code_module"),
+    col("code_presentation"),
+    col("activity_type"),
+    col("week_from"),
+    col("week_to")
+).distinct()
+
+print(f"✅ Dim_VLE_Activity créée : {dim_vle_activity.count()} activités")
+dim_vle_activity.groupBy("activity_type").count().orderBy(desc("count")).show()
+
+
+print("Création de Fact_Student_Performance...")
+
+fact_student_performance = student_assessment_df.join(
+    assessments_df,
+    on="id_assessment",
+    how="inner"
+).select(
+    col("id_student"),
+    col("id_assessment"),
+    col("code_module"),
+    col("code_presentation"),
+    col("date_submitted"),
+    col("score"),
+    col("is_banked"),
+    # Calculer le statut Pass/Fail
+    when(col("score") >= 40, "Pass").otherwise("Fail").alias("assessment_status"),
+    col("assessment_type"),
+    col("weight")
+)
+
+# Nettoyer les données
+fact_student_performance = fact_student_performance.filter(
+    (col("score").isNotNull()) & 
+    (col("score") >= 0) & 
+    (col("score") <= 100)
+)
+
+print(f"✅ Fact_Student_Performance créée : {fact_student_performance.count()} résultats")
+fact_student_performance.show(5)
+
+
+print("Création de Fact_Student_Engagement...")
+
+fact_student_engagement = student_vle_df.select(
+    col("id_student"),
+    col("code_module"),
+    col("code_presentation"),
+    col("id_site"),
+    col("date").alias("interaction_date"),
+    col("sum_click")
+).filter(
+    (col("sum_click").isNotNull()) & 
+    (col("sum_click") > 0)
+)
+
+# Ajouter la semaine
+fact_student_engagement = fact_student_engagement.withColumn(
+    "week_number",
+    floor(col("interaction_date") / 7)
+)
+
+print(f"✅ Fact_Student_Engagement créée : {fact_student_engagement.count()} interactions")
+fact_student_engagement.show(5)
+
+
+print("\nCréation de Fact_Student_Skills...")
+
+
+fact_student_skills = online_classroom_data_df.select(
+    col("id_student").cast("integer"),
+    col("sk1_classroom").alias("critical_thinking"),      
+    col("sk2_classroom").alias("creativity"),             
+    col("sk3_classroom").alias("self_learning"),          
+    col("sk4_classroom").alias("collaboration"),          
+    col("sk5_classroom").alias("social_responsibility"),  
+    col("helpful_post").cast("integer"),
+    col("collaborative_post").cast("integer"),
+    col("creative_post").cast("integer"),
+    col("amazing_post").cast("integer"),
+    col("timeonline").cast("integer")
+).filter(
+    col("id_student").isNotNull()
+)
+
+# Nettoyer les valeurs (certaines colonnes contiennent des strings comme "0,3")
+# On prend juste la première valeur avant la virgule
+fact_student_skills = fact_student_skills.withColumn(
+    "critical_thinking",
+    when(col("critical_thinking").rlike("^[0-9]+"), 
+         split(col("critical_thinking"), ",")[0].cast("integer"))
+    .otherwise(0)
+)
+
+fact_student_skills = fact_student_skills.withColumn(
+    "creativity",
+    when(col("creativity").rlike("^[0-9]+"), 
+         split(col("creativity"), ",")[0].cast("integer"))
+    .otherwise(0)
+)
+
+fact_student_skills = fact_student_skills.withColumn(
+    "self_learning",
+    when(col("self_learning").rlike("^[0-9]+"), 
+         split(col("self_learning"), ",")[0].cast("integer"))
+    .otherwise(0)
+)
+
+fact_student_skills = fact_student_skills.withColumn(
+    "collaboration",
+    when(col("collaboration").rlike("^[0-9]+"), 
+         split(col("collaboration"), ",")[0].cast("integer"))
+    .otherwise(0)
+)
+
+fact_student_skills = fact_student_skills.withColumn(
+    "social_responsibility",
+    when(col("social_responsibility").rlike("^[0-9]+"), 
+         split(col("social_responsibility"), ",")[0].cast("integer"))
+    .otherwise(0)
+)
+
+# Remplir les nulls
+fact_student_skills = fact_student_skills.na.fill({
+    "critical_thinking": 0,
+    "creativity": 0,
+    "self_learning": 0,
+    "collaboration": 0,
+    "social_responsibility": 0,
+    "helpful_post": 0,
+    "collaborative_post": 0,
+    "creative_post": 0,
+    "amazing_post": 0,
+    "timeonline": 0
+})
+
+print(f"✅ Fact_Student_Skills créée : {fact_student_skills.count()} étudiants")
+fact_student_skills.show(5)
+
+
+print("Sauvegarde des tables...")
+
+# Créer des vues temporaires pour faciliter l'accès
+dim_student.createOrReplaceTempView("dim_student")
+dim_module.createOrReplaceTempView("dim_module")
+dim_presentation.createOrReplaceTempView("dim_presentation")
+dim_assessment.createOrReplaceTempView("dim_assessment")
+dim_vle_activity.createOrReplaceTempView("dim_vle_activity")
+fact_student_performance.createOrReplaceTempView("fact_performance")
+fact_student_engagement.createOrReplaceTempView("fact_engagement")
+fact_student_skills.createOrReplaceTempView("fact_skills")
+
+print("✅ Toutes les vues temporaires sont créées")
+
+
+print("\n Sauvegarde permanente des tables dans bi_project.dwh...")
+
+# Créer le schéma dwh (Data Warehouse)
+spark.sql("CREATE SCHEMA IF NOT EXISTS bi_project.dwh")
+
+# Sauvegarder les dimensions
+print("  Sauvegarde des dimensions...")
+dim_student.write.mode("overwrite").saveAsTable("bi_project.dwh.dim_student")
+print("    ✅ dim_student")
+
+dim_module.write.mode("overwrite").saveAsTable("bi_project.dwh.dim_module")
+print("    ✅ dim_module")
+
+dim_presentation.write.mode("overwrite").saveAsTable("bi_project.dwh.dim_presentation")
+print("    ✅ dim_presentation")
+
+dim_assessment.write.mode("overwrite").saveAsTable("bi_project.dwh.dim_assessment")
+print("    ✅ dim_assessment")
+
+dim_vle_activity.write.mode("overwrite").saveAsTable("bi_project.dwh.dim_vle_activity")
+print("    ✅ dim_vle_activity")
+
+# Sauvegarder les tables de faits
+print("\n  Sauvegarde des tables de faits...")
+fact_student_performance.write.mode("overwrite").saveAsTable("bi_project.dwh.fact_performance")
+print("    ✅ fact_performance")
+
+fact_student_engagement.write.mode("overwrite").saveAsTable("bi_project.dwh.fact_engagement")
+print("    ✅ fact_engagement")
+
+fact_student_skills.write.mode("overwrite").saveAsTable("bi_project.dwh.fact_skills")
+print("    ✅ fact_skills")
+
+
+print("\n" + "=" * 60)
+print("📊 RÉCAPITULATIF DE L'ENTREPÔT DE DONNÉES")
+print("=" * 60)
+
+print("\n📁 TABLES DE DIMENSIONS :")
+print(f"  • Dim_Student         : {dim_student.count():>8,} lignes")
+print(f"  • Dim_Module          : {dim_module.count():>8,} lignes")
+print(f"  • Dim_Presentation    : {dim_presentation.count():>8,} lignes")
+print(f"  • Dim_Assessment      : {dim_assessment.count():>8,} lignes")
+print(f"  • Dim_VLE_Activity    : {dim_vle_activity.count():>8,} lignes")
+
+print("\n📊 TABLES DE FAITS :")
+print(f"  • Fact_Performance    : {fact_student_performance.count():>8,} lignes")
+print(f"  • Fact_Engagement     : {fact_student_engagement.count():>8,} lignes")
+print(f"  • Fact_Skills         : {fact_student_skills.count():>8,} lignes")
+
+print("\n" + "=" * 60)
+print("✅ TRANSFORMATION TERMINÉE AVEC SUCCÈS !")
+print("=" * 60)
+print("📍 Localisation des tables permanentes : bi_project.dwh")
+print("📍 Vues temporaires actives pour cette session")
+print("=" * 60)
+
+
+

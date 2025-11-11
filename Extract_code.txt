@@ -1,0 +1,80 @@
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import *
+from pyspark.sql.types import *
+
+courses_df = spark.read.table("bi_project.schema_entrepot.courses")
+print("courses.csv chargé")
+print(f"   Nombre de lignes : {courses_df.count()}")
+courses_df.show(5)
+
+assessments_df = spark.read.table("bi_project.schema_entrepot.assessments")
+print("assessments.csv chargé")
+print(f"   Nombre de lignes : {assessments_df.count()}")
+assessments_df.show(5)
+
+vle_df = spark.read.table("bi_project.schema_entrepot.vle")
+print("vle.csv chargé")
+print(f"   Nombre de lignes : {vle_df.count()}")
+vle_df.show(5)
+
+student_info_df = spark.read.table("bi_project.schema_entrepot.student_info")
+print("studentInfo.csv chargé")
+print(f"   Nombre de lignes : {student_info_df.count()}")
+student_info_df.show(5)
+
+student_registration_df = spark.read.table("bi_project.schema_entrepot.student_registration")
+print("studentRegistration.csv chargé")
+print(f"   Nombre de lignes : {student_registration_df.count()}")
+student_registration_df.show(5)
+
+student_assessment_df = spark.read.table("bi_project.schema_entrepot.student_assessment")
+print("studentAssessment.csv chargé")
+print(f"   Nombre de lignes : {student_assessment_df.count()}")
+student_assessment_df.show(5)
+
+online_classroom_data_df = spark.read.table("bi_project.schema_entrepot.online_classroom_data")
+print("online_classroom_data.csv chargé")
+print(f"   Nombre de lignes : {online_classroom_data_df.count()}")
+online_classroom_data_df.show(5)
+
+student_vle_df = spark.read.table("bi_project.schema_entrepot.student_vle")
+print("studentVle.csv chargé")
+print(f"   Nombre de lignes : {student_vle_df.count()}")
+student_vle_df.show(5)
+
+
+
+print("=" * 50)
+print("STATISTIQUES GLOBALES")
+print("=" * 50)
+
+print(f"Modules uniques : {courses_df.select('code_module').distinct().count()}")
+print(f"Présentations uniques : {courses_df.select('code_presentation').distinct().count()}")
+print(f"Étudiants uniques : {student_info_df.select('id_student').distinct().count()}")
+print(f"Évaluations uniques : {assessments_df.select('id_assessment').distinct().count()}")
+print(f"Sites VLE uniques : {vle_df.select('id_site').distinct().count()}")
+
+
+print("=" * 50)
+print("VALEURS MANQUANTES DANS Student_info")
+print("=" * 50)
+for col_name in student_info_df.columns:
+    null_count = student_info_df.filter(col(col_name).isNull()).count()
+    if null_count > 0:
+        print(f"  {col_name}: {null_count} valeurs manquantes")
+
+print("\n✅ EXTRACTION TERMINÉE AVEC SUCCÈS!")
+
+print("SAUVEGARDE DES DATAFRAMES DANS bi_project.temp")
+spark.sql("CREATE SCHEMA IF NOT EXISTS bi_project.temp")
+
+courses_df.write.mode("overwrite").saveAsTable("bi_project.temp.courses_df")
+assessments_df.write.mode("overwrite").saveAsTable("bi_project.temp.assessments_df")
+vle_df.write.mode("overwrite").saveAsTable("bi_project.temp.vle_df")
+student_info_df.write.mode("overwrite").saveAsTable("bi_project.temp.student_info_df")
+student_registration_df.write.mode("overwrite").saveAsTable("bi_project.temp.student_registration_df")
+student_assessment_df.write.mode("overwrite").saveAsTable("bi_project.temp.student_assessment_df")
+online_classroom_data_df.write.mode("overwrite").saveAsTable("bi_project.temp.online_classroom_data_df")
+student_vle_df.write.mode("overwrite").saveAsTable("bi_project.temp.student_vle_df")
+
+print("\n✅ TABLES TEMPORAIRES CRÉÉES !")
